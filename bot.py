@@ -1,19 +1,42 @@
 import logging
 import gspread
-import json
-import os
 from oauth2client.service_account import ServiceAccountCredentials
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 from datetime import datetime
-import re
+import os
+import json
+from flask import Flask
+from threading import Thread
 
-# --- CONFIGURACIÓN ---
-TOKEN = "8541832197:AAHCbxj7N6Qq-oRzn987VFvfMFesdbmGJJ4"  # Tu token actual
-SHEET_NAME = "Finanzas_Bot_DB"  # El nombre exacto de tu Sheet
-JSON_CREDENTIALS = "credenciales.json"  # El nombre de tu archivo descargado
+# --- 1. EL TRUCO PARA RENDER (SERVIDOR FALSO) ---
+app = Flask('')
 
-# Categorías y palabras clave simples para intentar adivinar
+
+@app.route('/')
+def home():
+    return "¡Hola! Soy el bot de Marcelo y estoy vivo."
+
+
+def run():
+    # Render asigna un puerto en la variable PORT, usamos 8080 por defecto
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
+
+
+def keep_alive():
+    t = Thread(target=run)
+    t.start()
+
+
+# --- 2. CONFIGURACIÓN DEL BOT ---
+# Leemos el TOKEN desde los secretos (Variable de entorno)
+# Si no existe (local), pégalo aquí para pruebas, pero en la nube lo leerá solo
+TOKEN = os.environ.get("TELEGRAM_TOKEN", "TU_TOKEN_AQUI_SI_PRUEBAS_LOCAL")
+
+SHEET_NAME = "Finanzas_Bot_DB"
+
+# Categorías
 CATEGORIAS = {
     "comida": ["almuerzo", "cena", "desayuno", "cafe", "café", "super", "mercado", "uber eats", "rappi"],
     "transporte": ["uber", "didi", "taxi", "bus", "tren", "gasolina", "parqueo", "peaje"],
@@ -23,16 +46,14 @@ CATEGORIAS = {
 }
 
 
-# --- CONEXIÓN GOOGLE SHEETS (MODO HÍBRIDO) ---
+# --- 3. CONEXIÓN GOOGLE SHEETS (HÍBRIDA) ---
 def conectar_sheet():
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
 
     if os.path.exists("credenciales.json"):
-        # Modo Local (Tu compu)
         creds = ServiceAccountCredentials.from_json_keyfile_name("credenciales.json", scope)
     else:
-        # Modo Nube (Servidor)
-        # Usaremos una variable de entorno llamada "text_key"
+        # En Render leemos el secreto de la variable 'text_key'
         key_dict = json.loads(os.environ["text_key"])
         creds = ServiceAccountCredentials.from_json_keyfile_dict(key_dict, scope)
 
@@ -41,89 +62,69 @@ def conectar_sheet():
     return sheet
 
 
-# --- LÓGICA DEL BOT ---
-
+# --- 4. LÓGICA DEL BOT ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "¡Hola Marcelo! 🚀\n\nListo para registrar finanzas.\n\nEjemplos:\n- Gasto: `5000 almuerzo`\n- Ingreso: `+200000 pago`\n- Hormiga: `2000 helado h`")
+        "¡Hola Marcelo! 🚀\n\nEstoy vivo en la nube.\n\nEjemplos:\n- Gasto: `5000 almuerzo`\n- Ingreso: `+200000 pago`\n- Hormiga: `2000 helado h`")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = update.message.text.lower().strip()
-
-    # Datos básicos
     fecha = datetime.now().strftime("%Y-%m-%d")
     hora = datetime.now().strftime("%H:%M:%S")
     es_hormiga = False
     tipo = "Gasto"
 
     try:
-        # 1. Detectar si es Gasto Hormiga (termina en 'h')
         if texto.endswith(" h"):
             es_hormiga = True
-            texto = texto[:-2].strip()  # Quitar la 'h' del texto
+            texto = texto[:-2].strip()
 
-        # 2. Separar Monto y Descripción
-        partes = texto.split(" ", 1)  # Divide en el primer espacio
-
+        partes = texto.split(" ", 1)
         if len(partes) < 2:
-            await update.message.reply_text("⚠️ Formato incorrecto. Usa: `Monto Descripción`")
+            await update.message.reply_text("⚠️ Usa: `Monto Descripción`")
             return
 
         monto_str = partes[0]
         descripcion = partes[1]
 
-        # 3. Detectar si es Ingreso (+) o Gasto (-)
         if monto_str.startswith("+"):
             tipo = "Ingreso"
             monto = float(monto_str.replace("+", ""))
         else:
             tipo = "Gasto"
-            monto = float(monto_str) * -1  # Gastos en negativo
+            monto = float(monto_str) * -1
 
-        # 4. Categorización Automática
         categoria_detectada = "otros"
-
-        # Buscar palabras clave en la descripción
         for cat, keywords in CATEGORIAS.items():
             if any(keyword in descripcion for keyword in keywords):
                 categoria_detectada = cat
                 break
-
-        # Si la descripción es explícitamente una categoría (ej: "5000 transporte")
         if descripcion in CATEGORIAS.keys():
             categoria_detectada = descripcion
 
-        # --- GUARDAR EN SHEETS ---
         sheet = conectar_sheet()
-        # Orden columnas: fecha, hora, concepto, monto, categoria, tipo, es_hormiga
         fila = [fecha, hora, descripcion, monto, categoria_detectada, tipo, es_hormiga]
         sheet.append_row(fila)
 
-        # Respuesta al usuario
         emoji = "🐜" if es_hormiga else "✅"
-        await update.message.reply_text(
-            f"{emoji} Registrado:\n"
-            f"💰 {monto:,.0f}\n"
-            f"🏷 {categoria_detectada.upper()}\n"
-            f"📝 {descripcion}"
-        )
+        await update.message.reply_text(f"{emoji} Guardado: ₡{monto:,.0f} ({categoria_detectada})")
 
     except ValueError:
-        await update.message.reply_text("⚠️ El monto debe ser un número. Ejemplo: `4500 pizza`")
+        await update.message.reply_text("⚠️ El monto debe ser un número.")
     except Exception as e:
         logging.error(f"Error: {e}")
-        await update.message.reply_text(f"❌ Error interno: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
 
 
 if __name__ == '__main__':
+    # 1. Arrancamos el servidor falso en segundo plano
+    keep_alive()
+
+    # 2. Arrancamos el bot
     application = ApplicationBuilder().token(TOKEN).build()
+    application.add_handler(CommandHandler('start', start))
+    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
 
-    start_handler = CommandHandler('start', start)
-    msg_handler = MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message)
-
-    application.add_handler(start_handler)
-    application.add_handler(msg_handler)
-
-    print("🤖 Bot corriendo... (Presiona Ctrl+C para detener)")
+    print("🤖 Bot corriendo...")
     application.run_polling()
