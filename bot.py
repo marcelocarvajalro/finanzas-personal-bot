@@ -1,5 +1,7 @@
 import logging
 import gspread
+import json
+import os
 from oauth2client.service_account import ServiceAccountCredentials
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
@@ -21,10 +23,19 @@ CATEGORIAS = {
 }
 
 
-# --- CONEXIÓN GOOGLE SHEETS ---
+# --- CONEXIÓN GOOGLE SHEETS (MODO HÍBRIDO) ---
 def conectar_sheet():
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    creds = ServiceAccountCredentials.from_json_keyfile_name(JSON_CREDENTIALS, scope)
+
+    if os.path.exists("credenciales.json"):
+        # Modo Local (Tu compu)
+        creds = ServiceAccountCredentials.from_json_keyfile_name("credenciales.json", scope)
+    else:
+        # Modo Nube (Servidor)
+        # Usaremos una variable de entorno llamada "text_key"
+        key_dict = json.loads(os.environ["text_key"])
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(key_dict, scope)
+
     client = gspread.authorize(creds)
     sheet = client.open(SHEET_NAME).sheet1
     return sheet
