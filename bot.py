@@ -9,34 +9,24 @@ import json
 from flask import Flask
 from threading import Thread
 
-# --- 1. EL TRUCO PARA RENDER (SERVIDOR FALSO) ---
+# --- SERVIDOR FALSO PARA RENDER ---
 app = Flask('')
 
 
 @app.route('/')
-def home():
-    return "¡Hola! Soy el bot de Marcelo y estoy vivo."
+def home(): return "Bot Activo"
 
 
-def run():
-    # Render asigna un puerto en la variable PORT, usamos 8080 por defecto
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
+def run(): app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
 
 
-def keep_alive():
-    t = Thread(target=run)
-    t.start()
+def keep_alive(): t = Thread(target=run); t.start()
 
 
-# --- 2. CONFIGURACIÓN DEL BOT ---
-# Leemos el TOKEN desde los secretos (Variable de entorno)
-# Si no existe (local), pégalo aquí para pruebas, pero en la nube lo leerá solo
-TOKEN = os.environ.get("TELEGRAM_TOKEN", "TU_TOKEN_AQUI_SI_PRUEBAS_LOCAL")
-
+# --- CONFIGURACIÓN ---
+TOKEN = os.environ.get("TELEGRAM_TOKEN", "TU_TOKEN_SI_ES_LOCAL")
 SHEET_NAME = "Finanzas_Bot_DB"
 
-# Categorías
 CATEGORIAS = {
     "comida": ["almuerzo", "cena", "desayuno", "cafe", "café", "super", "mercado", "uber eats", "rappi"],
     "transporte": ["uber", "didi", "taxi", "bus", "tren", "gasolina", "parqueo", "peaje"],
@@ -46,85 +36,91 @@ CATEGORIAS = {
 }
 
 
-# --- 3. CONEXIÓN GOOGLE SHEETS (HÍBRIDA) ---
+# --- CONEXIÓN GOOGLE SHEETS ---
 def conectar_sheet():
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-
     if os.path.exists("credenciales.json"):
         creds = ServiceAccountCredentials.from_json_keyfile_name("credenciales.json", scope)
     else:
-        # En Render leemos el secreto de la variable 'text_key'
         key_dict = json.loads(os.environ["text_key"])
         creds = ServiceAccountCredentials.from_json_keyfile_dict(key_dict, scope)
-
     client = gspread.authorize(creds)
-    sheet = client.open(SHEET_NAME).sheet1
-    return sheet
+    return client.open(SHEET_NAME).sheet1
 
 
-# --- 4. LÓGICA DEL BOT ---
+# --- LÓGICA DEL BOT (MODO DIAGNÓSTICO) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "¡Hola Marcelo! 🚀\n\nEstoy vivo en la nube.\n\nEjemplos:\n- Gasto: `5000 almuerzo`\n- Ingreso: `+200000 pago`\n- Hormiga: `2000 helado h`")
+    await update.message.reply_text("🛠️ MODO DIAGNÓSTICO ACTIVO 🛠️\nIntenta registrar algo.")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    texto = update.message.text.lower().strip()
-    fecha = datetime.now().strftime("%Y-%m-%d")
-    hora = datetime.now().strftime("%H:%M:%S")
-    es_hormiga = False
-    tipo = "Gasto"
+    texto_original = update.message.text
+    print(f"DEBUG: Recibí '{texto_original}'")  # Esto sale en los logs de Render
 
     try:
-        if texto.endswith(" h"):
-            es_hormiga = True
-            texto = texto[:-2].strip()
+        # 1. Limpieza agresiva
+        texto = texto_original.lower().strip()
 
+        # Eliminar el "+" si hay un espacio accidental ("+ 500" -> "+500")
+        if texto.startswith("+ "):
+            texto = texto.replace("+ ", "+", 1)
+
+        # 2. Separar monto y descripción
         partes = texto.split(" ", 1)
         if len(partes) < 2:
-            await update.message.reply_text("⚠️ Usa: `Monto Descripción`")
+            await update.message.reply_text(f"⚠️ Error de Formato.\nEntendí: '{texto}'\nNecesito: Monto Descripción")
             return
 
         monto_str = partes[0]
         descripcion = partes[1]
 
-        if monto_str.startswith("+"):
-            tipo = "Ingreso"
-            monto = float(monto_str.replace("+", ""))
-        else:
-            tipo = "Gasto"
-            monto = float(monto_str) * -1
+        # 3. Limpieza de basura en el número
+        # Quitamos comas, simbolos de moneda y espacios invisibles
+        monto_limpio = monto_str.replace(",", "").replace("¢", "").replace("$", "").strip()
 
+        # 4. Conversión (Aquí es donde fallaba)
+        try:
+            if monto_limpio.startswith("+"):
+                tipo = "Ingreso"
+                monto = float(monto_limpio.replace("+", ""))
+            else:
+                tipo = "Gasto"
+                monto = float(monto_limpio)
+                if monto > 0: monto = monto * -1  # Asegurar negativo
+        except ValueError:
+            # Si falla aquí, le decimos al usuario EXACTAMENTE qué intentó leer
+            await update.message.reply_text(
+                f"🔍 ERROR DE LECTURA:\nIntenté leer el número: '{monto_limpio}'\nOriginal: '{monto_str}'\nRevisa si escribiste una letra o símbolo raro.")
+            return
+
+        # 5. Categoría
         categoria_detectada = "otros"
         for cat, keywords in CATEGORIAS.items():
             if any(keyword in descripcion for keyword in keywords):
                 categoria_detectada = cat
                 break
-        if descripcion in CATEGORIAS.keys():
-            categoria_detectada = descripcion
 
+        # Hormiga
+        es_hormiga = False
+        if descripcion.strip().endswith(" h"):
+            es_hormiga = True
+            descripcion = descripcion[:-2]  # Quitar la h
+
+        # 6. Guardar
         sheet = conectar_sheet()
-        fila = [fecha, hora, descripcion, monto, categoria_detectada, tipo, es_hormiga]
+        fila = [datetime.now().strftime("%Y-%m-%d"), datetime.now().strftime("%H:%M:%S"), descripcion, monto,
+                categoria_detectada, tipo, es_hormiga]
         sheet.append_row(fila)
 
-        emoji = "🐜" if es_hormiga else "✅"
-        await update.message.reply_text(f"{emoji} Guardado: ₡{monto:,.0f} ({categoria_detectada})")
+        await update.message.reply_text(f"💾 Guardado con éxito:\nMonto: {monto}\nCat: {categoria_detectada}")
 
-    except ValueError:
-        await update.message.reply_text("⚠️ El monto debe ser un número.")
     except Exception as e:
-        logging.error(f"Error: {e}")
-        await update.message.reply_text(f"❌ Error: {e}")
+        await update.message.reply_text(f"🔥 Error Crítico: {e}")
 
 
 if __name__ == '__main__':
-    # 1. Arrancamos el servidor falso en segundo plano
     keep_alive()
-
-    # 2. Arrancamos el bot
     application = ApplicationBuilder().token(TOKEN).build()
     application.add_handler(CommandHandler('start', start))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
-
-    print("🤖 Bot corriendo...")
     application.run_polling()
