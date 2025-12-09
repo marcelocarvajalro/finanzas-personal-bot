@@ -5,7 +5,8 @@ import plotly.graph_objects as go
 from oauth2client.service_account import ServiceAccountCredentials
 import gspread
 from datetime import datetime
-
+import json
+import os
 # --- CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(page_title="Finanzas Personales", page_icon="💰", layout="wide")
 
@@ -28,26 +29,44 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 
-# --- CONEXIÓN A GOOGLE SHEETS (CON CACHÉ PARA RAPIDEZ) ---
-@st.cache_data(ttl=60)  # Actualiza los datos cada 60 segundos
+# --- CONEXIÓN A GOOGLE SHEETS (MODO HÍBRIDO: NUBE + LOCAL) ---
+@st.cache_data(ttl=60)
 def load_data():
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    creds = ServiceAccountCredentials.from_json_keyfile_name("credenciales.json", scope)
+
+    # LÓGICA MAGICA:
+    # Si existe el archivo en la compu (Local), lo usa.
+    # Si no existe (Nube), busca la contraseña en los Secretos de Streamlit.
+    if os.path.exists("credenciales.json"):
+        creds = ServiceAccountCredentials.from_json_keyfile_name("credenciales.json", scope)
+    else:
+        # Aquí lee el secreto de la nube
+        key_dict = json.loads(st.secrets["text_key"])
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(key_dict, scope)
+
     client = gspread.authorize(creds)
     sheet = client.open("Finanzas_Bot_DB").sheet1
     data = sheet.get_all_records()
+
+    # Si no hay datos, devolvemos un DataFrame vacío
+    if not data:
+        return pd.DataFrame()
+
     df = pd.DataFrame(data)
 
-    # Limpieza de datos
-    if not df.empty:
-        # Convertir montos a números
-        df['monto'] = pd.to_numeric(df['monto'])
-        # Convertir fecha a datetime
-        df['fecha'] = pd.to_datetime(df['fecha'])
-        # Crear columna de Mes y Año para filtros
-        df['mes'] = df['fecha'].dt.month_name()
-        df['año'] = df['fecha'].dt.year
-        df['mes_num'] = df['fecha'].dt.month  # Para ordenar
+    # --- LIMPIEZA DE DATOS ---
+    # Convertir montos a números
+    df['monto'] = pd.to_numeric(df['monto'])
+    # Convertir fecha a datetime
+    df['fecha'] = pd.to_datetime(df['fecha'])
+    # Crear columnas útiles
+    df['mes'] = df['fecha'].dt.month_name()
+    df['año'] = df['fecha'].dt.year
+    df['mes_num'] = df['fecha'].dt.month
+    # Asegurar que es_hormiga sea string
+    if 'es_hormiga' in df.columns:
+        df['es_hormiga'] = df['es_hormiga'].astype(str).str.upper()
+
     return df
 
 
